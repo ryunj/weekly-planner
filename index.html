@@ -640,7 +640,7 @@ function toast(msg){
 /* ───────── 앱(PWA) ───────── */
 // 1) 서비스워커 — 오프라인에서도 열리게 앱 셸을 캐시
 if("serviceWorker" in navigator && location.protocol !== "file:"){
-  addEventListener("load", () => navigator.serviceWorker.register("./sw.js").catch(() => {}));
+  navigator.serviceWorker.register("./sw.js").catch(e => console.warn("서비스워커 등록 실패:", e));
 }
 
 // 2) 설치 버튼 — 브라우저가 설치 가능하다고 알려줄 때만 노출
