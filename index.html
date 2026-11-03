@@ -4,6 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>주간 체크리스트</title>
+<meta name="description" content="카테고리 × 요일 격자로 주차별 할 일을 관리하는 체크리스트">
+<link rel="manifest" href="./manifest.webmanifest">
+<meta name="theme-color" content="#2563eb">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="주간체크">
+<link rel="apple-touch-icon" href="./apple-touch-icon.png">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232563eb'/%3E%3Cpath d='M9 16.5l4.5 4.5L23 11.5' stroke='white' stroke-width='3.2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <style>
   :root{
@@ -43,6 +51,13 @@
   .btn:hover{border-color:var(--accent);background:var(--accent-soft)}
   .btn.icon{padding:7px 10px;min-width:34px;text-align:center}
   .btn.ghost{border-color:transparent;background:transparent;color:var(--muted)}
+  #install{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+  .offline{
+    display:none; align-items:center; gap:5px; font-size:12px; font-weight:700;
+    color:#b45309; background:#fef3c7; border-radius:99px; padding:4px 10px;
+  }
+  :root[data-theme="dark"] .offline{color:#fcd34d;background:#3b2f0f}
+  body.is-offline .offline{display:inline-flex}
   .btn.ghost:hover{background:var(--line2);color:var(--text)}
   .wk{display:flex;flex-direction:column;line-height:1.25;min-width:190px}
   .wk b{font-size:16px;font-weight:800;letter-spacing:-.3px}
@@ -187,12 +202,15 @@
 
     <div class="spacer"></div>
 
+    <span class="offline noprint">● 오프라인 — 저장은 정상</span>
+
     <div class="progress">
       <span id="pcText">0 / 0</span>
       <span class="bar"><i id="pcBar"></i></span>
     </div>
 
     <div class="nav noprint">
+      <button class="btn" id="install" hidden title="이 기기에 앱으로 설치">⬇ 앱 설치</button>
       <button class="btn" id="copyPrev" title="지난주 항목을 이번 주로 복사">지난주 복사</button>
       <button class="btn icon" id="theme" title="다크모드 (D)">◐</button>
       <button class="btn icon" id="print" title="인쇄">🖨</button>
@@ -230,6 +248,7 @@
       · 단축키 <kbd>←</kbd><kbd>→</kbd> 주 이동 · <kbd>T</kbd> 오늘 · <kbd>D</kbd> 다크모드 · <kbd>P</kbd> 인쇄<br>
       · 데이터는 이 브라우저에만 저장됩니다. 가끔 <b>백업 내보내기</b>를 해두세요.
     </p>
+    <p class="hint" id="storageInfo" style="border-top:1px solid var(--line2);padding-top:10px"></p>
   </div>
   <div class="dlg-f">
     <button class="btn" id="expBtn">백업 내보내기</button>
@@ -541,7 +560,7 @@ document.addEventListener("keydown", e => {
 
 /* ───────── 설정 ───────── */
 const dlg = $("#dlg");
-$("#settings").onclick = () => { renderCats(); dlg.showModal(); };
+$("#settings").onclick = () => { renderCats(); dlg.showModal(); storageStatus(true); };
 $("#dlgClose").onclick = () => dlg.close();
 
 function renderCats(){
@@ -617,6 +636,51 @@ function toast(msg){
   const t = $("#toast"); t.textContent = msg; t.classList.add("on");
   clearTimeout(tTimer); tTimer = setTimeout(() => t.classList.remove("on"), 1800);
 }
+
+/* ───────── 앱(PWA) ───────── */
+// 1) 서비스워커 — 오프라인에서도 열리게 앱 셸을 캐시
+if("serviceWorker" in navigator && location.protocol !== "file:"){
+  addEventListener("load", () => navigator.serviceWorker.register("./sw.js").catch(() => {}));
+}
+
+// 2) 설치 버튼 — 브라우저가 설치 가능하다고 알려줄 때만 노출
+let installPrompt = null;
+const installBtn = $("#install");
+addEventListener("beforeinstallprompt", e => {
+  e.preventDefault(); installPrompt = e; installBtn.hidden = false;
+});
+installBtn.onclick = async () => {
+  if(!installPrompt) return;
+  installPrompt.prompt();
+  const { outcome } = await installPrompt.userChoice;
+  installPrompt = null; installBtn.hidden = true;
+  if(outcome === "accepted") toast("앱으로 설치했습니다");
+};
+addEventListener("appinstalled", () => { installBtn.hidden = true; toast("앱으로 설치했습니다"); });
+
+// 3) 저장 공간을 '영구'로 요청 — 브라우저가 공간 부족 시 데이터를 지우는 것을 막는다
+async function storageStatus(request){
+  const box = $("#storageInfo");
+  if(!navigator.storage?.estimate){ box.textContent = "이 브라우저는 저장 공간 정보를 제공하지 않습니다."; return; }
+  let persisted = await navigator.storage.persisted?.() ?? false;
+  // 권한 요청은 사용자가 설정을 열었을 때만 (브라우저에 따라 확인창이 뜰 수 있으므로)
+  if(!persisted && request) persisted = await navigator.storage.persist?.().catch(() => false) ?? false;
+  const { usage = 0 } = await navigator.storage.estimate();
+  const standalone = matchMedia("(display-mode: standalone)").matches;
+  box.innerHTML =
+    `<b>저장 상태</b><br>` +
+    `· 보관 방식: ${persisted ? "영구 보관 허용됨 (자동 삭제 안 됨)" : "일반 — 공간 부족 시 브라우저가 지울 수 있음"}<br>` +
+    `· 사용량: 약 ${(usage/1024).toFixed(1)} KB<br>` +
+    `· 실행 모드: ${standalone ? "설치된 앱" : "브라우저 탭"}<br>` +
+    `· 브라우저의 '쿠키 및 사이트 데이터 삭제'를 실행하면 보관 방식과 무관하게 지워집니다.`;
+}
+storageStatus(false);
+
+// 4) 오프라인 표시
+const syncNet = () => document.body.classList.toggle("is-offline", !navigator.onLine);
+addEventListener("online", () => { syncNet(); toast("온라인으로 전환"); });
+addEventListener("offline", () => { syncNet(); toast("오프라인 — 입력은 계속 저장됩니다"); });
+syncNet();
 
 /* ───────── 시작 ───────── */
 document.documentElement.dataset.theme = S.theme;
