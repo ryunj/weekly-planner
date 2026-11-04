@@ -104,20 +104,31 @@
   .grid > .cell:nth-child(8n+8){border-right:0}
 
   .task{
+    position:relative;
     display:flex; align-items:flex-start; gap:5px; padding:2px 3px; border-radius:6px;
     background:color-mix(in srgb, var(--panel) 72%, transparent);
   }
   .task:hover{background:var(--panel)}
   .task input[type=checkbox]{margin:3px 0 0;width:14px;height:14px;accent-color:var(--c);flex:none;cursor:pointer}
-  .task .txt{flex:1;font-size:12.5px;word-break:break-all;cursor:text;padding:1px 0;min-width:0}
+  .task .body{flex:1;min-width:0}
+  .task .line{display:flex;align-items:baseline;gap:4px}
+  .task .txt{flex:1;font-size:12.5px;word-break:keep-all;overflow-wrap:anywhere;cursor:text;padding:1px 0;min-width:0}
   .task.done .txt{color:var(--done);text-decoration:line-through}
   .task.star .txt{font-weight:800}
-  .task .acts{display:none;gap:1px;flex:none}
+  .task .time{
+    flex:none;font-size:10.5px;font-weight:800;font-variant-numeric:tabular-nums;
+    color:var(--accent);background:var(--accent-soft);border-radius:4px;padding:1px 4px;
+  }
+  .task.done .time{color:var(--done);background:transparent;padding-left:0}
+  .task .rep{display:inline-block;font-size:10px;color:var(--muted);margin-top:1px}
+  /* 버튼은 겹쳐 띄워 글자 폭을 빼앗지 않는다 */
+  .task .acts{
+    display:none; gap:1px; position:absolute; top:1px; right:1px;
+    background:var(--panel); border-radius:6px; box-shadow:0 0 0 3px var(--panel);
+  }
   .task:hover .acts{display:flex}
   .acts button{font-size:11px;line-height:1;padding:3px;border-radius:5px;color:var(--muted)}
   .acts button:hover{background:var(--line2);color:var(--text)}
-  .task .rep{display:none;font-size:10px;color:var(--muted);flex:none;padding-top:3px}
-  .task.repeat .rep{display:block}
   .task.dragging{opacity:.4}
 
   .add{
@@ -242,8 +253,10 @@
     <p class="hint">
       <b>사용법</b><br>
       · 셀에 마우스를 올리면 <b>+ 추가</b> 버튼이 나타납니다. Enter로 연속 입력, Esc로 종료.<br>
-      · 할 일 텍스트를 클릭하면 바로 수정됩니다.<br>
-      · <b>↻</b> 를 누르면 <b>매주 반복</b> 항목이 되어 새 주차마다 자동으로 생깁니다(체크는 주차별로 따로).<br>
+      · 맨 앞에 <b>10:00</b> 처럼 시간을 적으면 시간 배지로 분리됩니다. (<code>10:00 주간회의</code>)<br>
+      · 할 일 텍스트를 클릭하면 시간까지 함께 수정됩니다. 시간만 지우려면 앞의 <code>10:00 </code>을 지우세요.<br>
+      · <b>↻</b> 를 누를 때마다 반복이 <b>매주 → 평일(월~금) → 매일 → 해제</b> 순으로 바뀝니다.
+        반복 항목은 새 주차마다 자동으로 생기고, 체크는 주차별로 따로입니다.<br>
       · 항목을 드래그해서 다른 요일·카테고리로 옮길 수 있습니다.<br>
       · 단축키 <kbd>←</kbd><kbd>→</kbd> 주 이동 · <kbd>T</kbd> 오늘 · <kbd>D</kbd> 다크모드 · <kbd>P</kbd> 인쇄<br>
       · 데이터는 이 브라우저에만 저장됩니다. 가끔 <b>백업 내보내기</b>를 해두세요.
@@ -276,16 +289,78 @@ const DEFAULT_CATS = [
 ];
 
 /* ───────── 저장소 ───────── */
-const blank = () => ({ cats: structuredClone(DEFAULT_CATS), routines: [], weeks: {}, theme: "light" });
+const blank = () => ({ v:2, cats: structuredClone(DEFAULT_CATS), routines: [], weeks: {}, theme: "light" });
+let migrated = false;
 let S = load();
+if(migrated) try{ localStorage.setItem(KEY, JSON.stringify(S)); }catch(e){}
+
 function load(){
   try{
     const raw = localStorage.getItem(KEY);
     if(!raw) return blank();
     const d = JSON.parse(raw);
-    return { cats: d.cats?.length ? d.cats : structuredClone(DEFAULT_CATS),
-             routines: d.routines || [], weeks: d.weeks || {}, theme: d.theme || "light" };
+    return migrate({ v: d.v || 1,
+             cats: d.cats?.length ? d.cats : structuredClone(DEFAULT_CATS),
+             routines: d.routines || [], weeks: d.weeks || {}, theme: d.theme || "light" });
   }catch(e){ return blank(); }
+}
+
+// v1 → v2 : 제목 앞의 "10:00 "을 시간 필드로 분리하고, 반복을 요일 배열로 바꾼다
+function migrate(s){
+  if(s.v >= 2) return s;
+  const split = o => { const p = parseTime(o.text); if(p){ o.time = p.time; o.text = p.text; } };
+  for(const r of s.routines){ split(r); if(!Array.isArray(r.days)) r.days = [r.dow ?? 0]; delete r.dow; }
+  for(const k in s.weeks) for(const it of (s.weeks[k].items || [])) split(it);
+
+  // 요일만 다르고 내용이 같은 반복은 하나로 합친다 (매일 반복이 없던 시절의 우회 입력)
+  const head = new Map(), remap = new Map();
+  for(const r of s.routines){
+    const key = [r.cat, r.text, r.time || "", r.star ? 1 : 0, r.from || ""].join("\u0000");
+    const h = head.get(key);
+    if(h){ for(const d of r.days) if(!h.days.includes(d)) h.days.push(d); remap.set(r.id, h.id); }
+    else head.set(key, r);
+  }
+  if(remap.size){
+    s.routines = s.routines.filter(r => !remap.has(r.id));
+    for(const k in s.weeks){
+      const w = s.weeks[k];
+      for(const it of (w.items || [])) if(it.rid && remap.has(it.rid)) it.rid = remap.get(it.rid);
+      w.seeded = [...new Set((w.seeded || []).map(id => remap.get(id) || id))];
+    }
+  }
+  for(const r of s.routines) r.days.sort((a, b) => a - b);
+  s.v = 2; migrated = true;
+  return s;
+}
+
+/* ───────── 시간 ───────── */
+// "10:00 회의" / "9.30 회의" → { time:"10:00", text:"회의" }
+function parseTime(str){
+  const m = /^(\d{1,2})[:.](\d{2})\s+(.+)$/.exec((str || "").trim());
+  if(!m) return null;
+  const h = +m[1], mi = +m[2];
+  if(h > 23 || mi > 59) return null;
+  return { time: `${String(h).padStart(2,"0")}:${m[2]}`, text: m[3].trim() };
+}
+const withTime = o => (o.time ? o.time + " " : "") + o.text;
+
+/* ───────── 반복 주기 ───────── */
+function repeatLabel(days){
+  if(!days?.length) return "";
+  const s = [...days].sort((a, b) => a - b).join(",");
+  if(s === "0,1,2,3,4,5,6") return "매일";
+  if(s === "0,1,2,3,4") return "평일";
+  if(s === "5,6") return "주말";
+  if(days.length === 1) return "매주 " + DOW[days[0]];
+  return `주 ${days.length}회`;
+}
+// 없음 → 매주(그 요일) → 평일 → 매일 → 없음
+function nextDays(days, dow){
+  if(!days?.length) return [dow];
+  const s = [...days].sort((a, b) => a - b).join(",");
+  if(s === "0,1,2,3,4") return [0,1,2,3,4,5,6];
+  if(s === "0,1,2,3,4,5,6") return null;
+  return [0,1,2,3,4];
 }
 let saveTimer = null;
 function save(){
@@ -334,12 +409,22 @@ function week(monday){
   for(const r of S.routines){
     if(w.seeded.includes(r.id)) continue;
     if(r.from && ymd < r.from) continue;
-    w.items.push({ id:uid(), cat:r.cat, dow:r.dow, text:r.text, star:!!r.star, done:false, rid:r.id });
+    for(const d of r.days) w.items.push(fromRoutine(r, d));
     w.seeded.push(r.id);
     changed = true;
   }
   if(changed) save();
   return w;
+}
+
+const fromRoutine = (r, dow) =>
+  ({ id:uid(), cat:r.cat, dow, text:r.text, time:r.time, star:!!r.star, done:false, rid:r.id });
+
+// 반복 주기를 바꾼 뒤, 이번 주 항목을 새 요일 구성에 맞춘다
+function syncRoutine(w, r){
+  w.items = w.items.filter(x => x.rid !== r.id || r.days.includes(x.dow));
+  for(const d of r.days)
+    if(!w.items.some(x => x.rid === r.id && x.dow === d)) w.items.push(fromRoutine(r, d));
 }
 
 /* ───────── 렌더 ───────── */
@@ -402,15 +487,21 @@ function taskNode(it, c){
   const cb = el("input"); cb.type = "checkbox"; cb.checked = !!it.done;
   cb.onchange = () => { it.done = cb.checked; save(); render(); };
 
+  const body = el("div", "body");
+  const line = el("div", "line");
+  if(it.time){ const t = el("span", "time"); t.textContent = it.time; line.appendChild(t); }
   const tx = el("span", "txt"); tx.textContent = it.text;
-  tx.onclick = () => editText(li, it, tx);
+  line.appendChild(tx);
+  body.appendChild(line);
+  tx.onclick = () => editText(line, it);
 
-  const rep = el("span", "rep"); rep.textContent = "↻";
+  const label = it.rid ? repeatLabel(S.routines.find(r => r.id === it.rid)?.days) : "";
+  if(label){ const rep = el("span", "rep"); rep.textContent = "↻ " + label; body.appendChild(rep); }
 
   const acts = el("span", "acts");
   acts.append(
     actBtn(it.star ? "★" : "☆", "중요", () => { it.star = !it.star; save(); render(); }),
-    actBtn("↻", "매주 반복", () => { toggleRepeat(it); }),
+    actBtn("↻", "반복 (매주 → 평일 → 매일 → 해제)", () => { cycleRepeat(it); }),
     actBtn("✕", "삭제", () => { removeItem(it); })
   );
 
@@ -419,7 +510,7 @@ function taskNode(it, c){
   });
   li.addEventListener("dragend", () => li.classList.remove("dragging"));
 
-  li.append(cb, tx, rep, acts);
+  li.append(cb, body, acts);
   return li;
 }
 
@@ -433,7 +524,7 @@ function el(tag, cls){ const n = document.createElement(tag); if(cls) n.classNam
 /* ───────── 편집 ───────── */
 function openInput(cell, cat, dow){
   const w = week(cursor);
-  const inp = el("input", "ed"); inp.placeholder = "할 일 입력 후 Enter";
+  const inp = el("input", "ed"); inp.placeholder = "할 일 (예: 10:00 주간회의)";
   cell.insertBefore(inp, cell.querySelector(".add"));
   inp.focus();
   const close = () => { inp.onblur = null; if(inp.isConnected) inp.remove(); };
@@ -441,7 +532,8 @@ function openInput(cell, cat, dow){
     if(e.key === "Enter"){
       const v = inp.value.trim();
       if(!v){ close(); return; }
-      w.items.push({ id:uid(), cat, dow, text:v, star:false, done:false });
+      const p = parseTime(v);
+      w.items.push({ id:uid(), cat, dow, text:p ? p.text : v, time:p?.time, star:false, done:false });
       save(); inp.value = "";
       const node = taskNode(w.items.at(-1), S.cats.find(c => c.id === cat));
       cell.insertBefore(node, inp);
@@ -451,17 +543,23 @@ function openInput(cell, cat, dow){
   inp.onblur = close;
 }
 
-function editText(li, it, tx){
-  const inp = el("input", "ed"); inp.value = it.text;
-  li.replaceChild(inp, tx); inp.focus(); inp.select();
+function editText(line, it){
+  const inp = el("input", "ed"); inp.value = withTime(it);
+  line.replaceChildren(inp); inp.focus(); inp.select();
   let closed = false;
   const done = commit => {
     if(closed) return;
     closed = true; inp.onblur = null;
     const v = inp.value.trim();
     if(commit && v){
-      it.text = v;
-      if(it.rid){ const r = S.routines.find(r => r.id === it.rid); if(r) r.text = v; }
+      const p = parseTime(v);
+      const apply = o => { o.text = p ? p.text : v; if(p) o.time = p.time; else delete o.time; };
+      apply(it);
+      if(it.rid){
+        const r = S.routines.find(r => r.id === it.rid);
+        if(r) apply(r);
+        for(const x of week(cursor).items) if(x.rid === it.rid) apply(x);   // 같은 반복의 다른 요일도
+      }
       save();
     }
     render();
@@ -473,27 +571,38 @@ function editText(li, it, tx){
   inp.onblur = () => done(true);
 }
 
-function toggleRepeat(it){
-  if(it.rid){
-    S.routines = S.routines.filter(r => r.id !== it.rid);
-    it.rid = null;
-    toast("반복 해제");
+function cycleRepeat(it){
+  const w = week(cursor);
+  const r = it.rid ? S.routines.find(x => x.id === it.rid) : null;
+  const days = nextDays(r?.days, it.dow);
+
+  if(!days){                                    // 매일 다음은 해제
+    S.routines = S.routines.filter(x => x.id !== it.rid);
+    w.items = w.items.filter(x => x.rid !== it.rid || x.id === it.id);
+    delete it.rid;
+    toast("반복 해제 (이 항목만 남김)");
+  }else if(r){
+    r.days = days;
+    syncRoutine(w, r);
+    toast("반복: " + repeatLabel(days));
   }else{
-    const w = week(cursor), rid = uid();
-    w.seeded.push(rid);                 // 이번 주에는 중복으로 심지 않는다
-    S.routines.push({ id:rid, cat:it.cat, dow:it.dow, text:it.text, star:!!it.star, from:ymdOf(cursor) });
+    const rid = uid();
+    S.routines.push({ id:rid, cat:it.cat, text:it.text, time:it.time, star:!!it.star, days, from:ymdOf(cursor) });
+    w.seeded.push(rid);                         // 이번 주에는 중복으로 심지 않는다
     it.rid = rid;
-    toast("매주 반복으로 등록 (다음 주부터 자동 생성)");
+    toast("반복: " + repeatLabel(days));
   }
   save(); render();
 }
 
 function removeItem(it){
   const w = week(cursor);
-  if(it.rid && !confirm(`"${it.text}" 은(는) 매주 반복 항목입니다.\n확인: 반복 자체를 삭제 / 취소: 이번 주만 삭제`)){
-    w.items = w.items.filter(x => x.id !== it.id);   // 이번 주만
+  if(it.rid && !confirm(`"${withTime(it)}" 은(는) 반복 항목입니다.\n확인: 반복 자체를 삭제 / 취소: 이번 주 이 항목만 삭제`)){
+    w.items = w.items.filter(x => x.id !== it.id);   // 이번 주 이 항목만
+  }else if(it.rid){
+    S.routines = S.routines.filter(r => r.id !== it.rid);
+    w.items = w.items.filter(x => x.rid !== it.rid);
   }else{
-    if(it.rid) S.routines = S.routines.filter(r => r.id !== it.rid);
     w.items = w.items.filter(x => x.id !== it.id);
   }
   save(); render();
